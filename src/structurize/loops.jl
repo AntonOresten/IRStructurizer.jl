@@ -262,9 +262,14 @@ function emit_loop!(block::Block, ctx::StructurizeCtx, header::Int,
         subs[phi.ssa_idx] = arg
     end
 
-    # Save remap state and add extra-exit remappings for the loop body.
-    # Inner defs get fresh indices; outer getfields keep the originals.
+    # Scope extra-exit renames to the body; results use the enclosing scope's names.
     saved_remap = copy(ctx.ssa_remap)
+    # An enclosing loop may rename our header args for its own escaping results.
+    # Leave body references at the original ids so apply_substitutions! binds
+    # them to this loop's block arguments.
+    for phi in phi_info
+        delete!(ctx.ssa_remap, phi.ssa_idx)
+    end
     for ex in extra_exits
         fresh = alloc_ssa!(ctx)
         ctx.ssa_remap[ex.ssa_idx] = fresh
@@ -273,7 +278,7 @@ function emit_loop!(block::Block, ctx::StructurizeCtx, header::Int,
         ext = widenconst(ex.type)
         push!(init_values, Undef(ext))
         push!(carried_values, SSAValue(fresh))  # carry the fresh-index value
-        push!(phi_indices, ex.ssa_idx)           # getfield OUTSIDE uses original
+        push!(phi_indices, ex.ssa_idx)
         push!(phi_types, ext)
         arg = BlockArgument(alloc_arg!(ctx), ext)
         push!(body.args, arg)
@@ -309,10 +314,10 @@ function emit_loop!(block::Block, ctx::StructurizeCtx, header::Int,
     anchor_line!(ctx, loop_ssa, header_anchor)
 
     for (i, (phi_idx, phi_type)) in enumerate(zip(phi_indices, phi_types))
-        # The loop result lands at the header arg's own id: a header is never a
-        # branch merge (the pre-header is), so `phi_idx` is not pre-defined by an
-        # enclosing IfOp, and post-loop uses of `phi_idx` resolve to this result.
-        push!(block, phi_idx, Expr(:call, Core.getfield, SSAValue(loop_ssa), i), phi_type)
+        # A result escaping an enclosing loop must use that loop's renamed id,
+        # matching its continue/break operands (as in emit_ifop_result!).
+        idx = get(ctx.ssa_remap, phi_idx, phi_idx)
+        push!(block, idx, Expr(:call, Core.getfield, SSAValue(loop_ssa), i), phi_type)
     end
 
     return exit_dest

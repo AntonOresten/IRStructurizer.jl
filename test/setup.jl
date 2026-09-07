@@ -9,13 +9,12 @@ function build_ir(blocks::Vector, argtypes::Vector)
     nstmts = sum(length(b.stmts) for b in blocks)
     # Build the InstructionStream from flat vectors via its bulk constructor.
     # The per-statement `Instruction` proxy with `inst[:field] = ...` only exists
-    # on 1.12+, whereas this constructor (and the 3-per-stmt packed `line`) is
-    # shared, matching production `build_dense_ircode`.
+    # on 1.12+, whereas the bulk constructor is shared across supported versions.
     all_stmts = Vector{Any}(undef, nstmts)
     all_types = Vector{Any}(undef, nstmts)
     all_flags = fill(CC.IR_FLAGS_EFFECTS, nstmts)
     info = CC.CallInfo[CC.NoCallInfo() for _ in 1:nstmts]
-    line = fill(Int32(0), nstmts * 3)
+    line = fill(Int32(0), nstmts * (VERSION >= v"1.12-" ? 3 : 1))
     ranges = UnitRange{Int}[]
     pos = 0
     for b in blocks
@@ -35,7 +34,7 @@ function build_ir(blocks::Vector, argtypes::Vector)
     end
     bbs = [CC.BasicBlock(CC.StmtRange(first(ranges[i]), last(ranges[i])),
                          preds[i], copy(blocks[i].succs)) for i in 1:nb]
-    cfg = CC.CFG(bbs, Int[first(r) for r in ranges])
+    cfg = CC.CFG(bbs, Int[first(r) for r in ranges[2:end]])
     @static if VERSION >= v"1.12-"
         return CC.IRCode(stmts, cfg, CC.DebugInfoStream(line), argtypes, Expr[], CC.VarState[])
     else

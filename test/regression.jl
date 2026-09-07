@@ -446,6 +446,54 @@ end
     end
 end
 
+@testset "escaping IV read through a PiNode" begin
+    # while i < upper; i += 1; end; return PiNode(i, Int)
+    # Keep the PiNode explicit: inference may remove a redundant type assertion.
+    ir = build_ir([
+        (stmts=[(GotoNode(2), Any)], succs=[2]),
+        (stmts=[(PhiNode(Int32[1, 3], Any[Argument(2), SSAValue(5)]), Int),
+                (Expr(:call, GlobalRef(Base, :slt_int), SSAValue(2), Argument(3)), Bool),
+                (GotoIfNot(SSAValue(3), 4), Any)], succs=[4, 3]),
+        (stmts=[(Expr(:call, GlobalRef(Base, :add_int), SSAValue(2), 1), Int),
+                (GotoNode(2), Any)], succs=[2]),
+        (stmts=[(PiNode(SSAValue(2), Int), Int),
+                (ReturnNode(SSAValue(7)), Any)], succs=Int[]),
+    ], Any[Any, Int, Int])
+    CC.verify_ir(ir)
+    sci = StructuredIRCode(ir)
+    for (lower, upper) in ((5, 2), (2, 2), (2, 5))
+        @test execute(sci, lower, upper) == max(lower, upper)
+    end
+end
+
+@testset "single-predecessor argument escaping a loop" begin
+    # A one-input phi copies the header IV into the body. Its last value escapes
+    # the loop, so binding the phi must define the id reserved by emit_loop!.
+    ir = build_ir([
+        (stmts=[(GotoNode(2), Any)], succs=[2]),
+        (stmts=[(PhiNode(Int32[1, 4], Any[0, SSAValue(5)]), Int),
+                (GotoNode(3), Any)], succs=[3]),
+        (stmts=[(PhiNode(Int32[2], Any[SSAValue(2)]), Int),
+                (Expr(:call, GlobalRef(Base, :add_int), SSAValue(4), 1), Int),
+                (Expr(:call, GlobalRef(Base, :slt_int), SSAValue(5), Argument(2)), Bool),
+                (GotoIfNot(SSAValue(6), 5), Any)], succs=[5, 4]),
+        (stmts=[(GotoNode(2), Any)], succs=[2]),
+        (stmts=[(ReturnNode(SSAValue(4)), Any)], succs=Int[]),
+    ], Any[Any, Int])
+    CC.verify_ir(ir)
+    for promote in (false, true), mux in (false, true)
+        m = IRStructurizer.ingest(CC.copy(ir))
+        if mux
+            # The continuation mux also leaves a single-predecessor argument.
+            IRStructurizer.single_entry_mux!(m, [IRStructurizer.EdgeRef(2, :goto)])
+        end
+        sci = IRStructurizer.lift_mcfg(m; promote)
+        for n in (0, 1, 3)
+            @test execute(sci, n) == max(0, n - 1)
+        end
+    end
+end
+
 @testset "PiNode carry and :invoke closure" begin
     # A value used through a PiNode after the loop must be threaded out.
     function pi_carry(v::Vector{Any}, n::Int)

@@ -1578,6 +1578,57 @@ end
     @test @roundtrip f_nested_forin(3, 4)
 end
 
+@testset "nested loops with an inner value escaping the outer loop" begin
+    # Constant bounds avoid an entry guard/merge between the loops, so the inner
+    # result directly escapes both loops and must use the enclosing rename.
+    f_const = (x) -> (for i in 1:2; for j in 1:2; x = x * (i + j); end; end; x)
+    @test @roundtrip f_const(1.5f0)
+    f_noi = (x) -> (for i in 1:2; for j in 1:2; x = x * 0.5f0; end; end; x)
+    @test @roundtrip f_noi(1.5f0)
+    f_comma = (x) -> (for i in 1:2, j in 1:2; x = x * (i + j); end; x)
+    @test @roundtrip f_comma(1.5f0)
+    f_triple = (x) -> (for i in 1:2; for j in 1:2; for k in 1:2; x = x * (i + j + k); end; end; end; x)
+    @test @roundtrip f_triple(1.5f0)
+    # The inner loop's header arg (`x`) is the value escaping the outer loop.
+    f_while_in_for = (x) -> (for i in 1:2; j = 1; while j <= 2; x = x * (i + j); j += 1; end; end; x)
+    @test @roundtrip f_while_in_for(1.5f0)
+    # `outer j` makes the inner IV escape. Its use in the outer loop's exit
+    # branch must prevent promotion from replacing it with the upper bound.
+    f_hdr = (x) -> (j = 0; for i in 1:2; for outer j in 1:2; x = x * (i + j); end; end; x + j)
+    @test @roundtrip f_hdr(1.5f0)
+    # Also read the IV in a branch between the loops.
+    function f_hdr_if(x, c)
+        j = 0
+        s = 0
+        for i in 1:2
+            for outer j in 1:2
+                x = x * (i + j)
+            end
+            if c
+                s += j
+            end
+        end
+        return x + s
+    end
+    @test @roundtrip f_hdr_if(1.5f0, true)
+    @test @roundtrip f_hdr_if(1.5f0, false)
+
+    # Both loops still promote to ForOp.
+    @test @filecheck begin
+        code_structured(Tuple{Float32}) do x
+            @check "for"
+            for i in 1:2
+                @check "for"
+                for j in 1:2
+                    @check "mul_float"
+                    x = x * (i + j)
+                end
+            end
+            return x
+        end
+    end
+end
+
 @testset "for-in-range with tuple destructuring" begin
     @test @filecheck begin
         code_structured(Tuple{Int}) do n
@@ -1598,6 +1649,17 @@ end
         return x
     end |> only
 
+end
+
+@testset "escaping IV read only inside a nested region after the loop" begin
+    # Reads in a later branch must keep the IV carry during promotion.
+    f_if = (x, c) -> (j = 0; s = 0; for outer j in 1:2; x = x * j; end; if c; s += j; end; x + s)
+    @test @roundtrip f_if(1.5f0, true)
+    @test @roundtrip f_if(1.5f0, false)
+    f_if_n = (n, c) -> (last = 0; for i in 1:n; last = i; end; c ? last : -1)
+    for n in (0, 1, 3), c in (false, true)
+        @test @roundtrip f_if_n(n, c)
+    end
 end
 
 @testset "for-in-range whose loop var escapes is a kept-carry ForOp" begin
