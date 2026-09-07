@@ -204,6 +204,12 @@ Base.iterate(r::SideRange, i::Int) = i === side_stop(r) ? nothing : (i + 1, i + 
 mutable struct MutStop; stop::Int; end
 @noinline opaque_mutstop(n) = MutStop(n)
 
+# A `while` whose header does more than compare: the call lands in the WhileOp's
+# `before` region, which a ForOp has no place for.
+const HEADER_CALLS = Ref(0)
+@noinline header_bump!() = (HEADER_CALLS[] += 1; nothing)
+side_header(n) = (i = 1; s = 0; while (header_bump!(); i <= n); s += i; i += 1; end; s)
+
 @testset "loop classification" begin
 
 @testset "ForOp detection" begin
@@ -576,6 +582,39 @@ end
     @test stays_loop(shrinking, Tuple{Int})
     @test @roundtrip shrinking(5)
     @test @roundtrip shrinking(0)
+end
+
+@testset "while header with a side effect is not promoted" begin
+    # The WhileOp-to-ForOp promotion drops the `before` region, so a header statement
+    # that is neither the hoisted bound nor deletable must keep the loop a WhileOp.
+    # Previously the call was silently dropped from the promoted ForOp.
+    HEADER_CALLS[] = 0
+    expected = side_header(3)
+    native_calls = HEADER_CALLS[]
+    @test native_calls == 4
+    sci, _ = code_structured(side_header, Tuple{Int}) |> only
+    @test count_stmts(sci.entry, x -> x isa ForOp) == 0
+    @test count_stmts(sci.entry, x -> x isa WhileOp) == 1
+    HEADER_CALLS[] = 0
+    @test execute(sci, 3) == expected
+    @test HEADER_CALLS[] == native_calls
+end
+
+@testset "while header values used by the body retain their scope" begin
+    function header_value(n)
+        i = 1
+        s = 0
+        while (k = n - i; i < n)
+            s += k
+            i += 1
+        end
+        return s
+    end
+    sci, _ = only(code_structured(header_value, Tuple{Int}))
+    @test count_stmts(sci.entry, x -> x isa LoopOp) == 1
+    @test count_stmts(sci.entry, x -> x isa ForOp || x isa WhileOp) == 0
+    @test @roundtrip header_value(5)
+    @test @roundtrip header_value(0)
 end
 
 @testset "hoisting requires safe speculation" begin

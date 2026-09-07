@@ -162,6 +162,12 @@ function hoistable_loop_def(entry, args::Vector{BlockArgument}, regions::Block..
     return true
 end
 
+"""Whether deleting a statement preserves effects and termination."""
+function droppable_loop_def(entry)
+    entry.flag & CC.IR_FLAGS_REMOVABLE == CC.IR_FLAGS_REMOVABLE || return false
+    return terminates(entry)
+end
+
 """Collect loop-invariant bound/step definitions to move before a `ForOp`.
 Return `nothing` if either value depends on the loop. Preserve SSA ids so uses
 remaining inside the loop resolve to the relocated definitions."""
@@ -704,6 +710,13 @@ function try_promote_while(loop::LoopOp, ctx::StructurizeCtx)
         end
     end
 
+    # The sibling before/after regions cannot share header SSA definitions.
+    # Keep the LoopOp if the body reads one, including through a nested region.
+    for (sidx, _) in body.body
+        sidx == last_idx && break
+        _refs_ssa_deep(stay_region, SSAValue(sidx)) && return nothing
+    end
+
     # Before region: header stmts (everything before the IfOp).
     before = Block()
     for (sidx, sentry) in body.body
@@ -831,6 +844,15 @@ function try_promote_for(op, idx::Int, parent_block::Block, new_body::SSAMap,
     # an opaque `r`) would otherwise dangle even without an `upper` adjustment.
     hoisted = collect_hoists((bound, step), vcat(before.args, after.args), before, after)
     hoisted === nothing && return (op, Int[])
+
+    # Promotion replaces the header with a range test. Any remaining header
+    # statement must be safe to delete, e.g. `while (f(); i <= n)` must retain f().
+    for (sidx, sentry) in before.body
+        sidx == cond_val.id && continue
+        haskey(hoisted, sidx) && continue
+        droppable_loop_def(sentry) || return (op, Int[])
+        _refs_ssa_deep(after, SSAValue(sidx)) && return (op, Int[])
+    end
 
     # Build ForOp.
     lower = op.init_values[iv_pos]
