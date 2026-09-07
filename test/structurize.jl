@@ -1600,6 +1600,17 @@ end
 
 end
 
+@testset "escaping IV read only inside a nested region after the loop" begin
+    # Reads in a later branch must keep the IV carry during promotion.
+    f_if = (x, c) -> (j = 0; s = 0; for outer j in 1:2; x = x * j; end; if c; s += j; end; x + s)
+    @test @roundtrip f_if(1.5f0, true)
+    @test @roundtrip f_if(1.5f0, false)
+    f_if_n = (n, c) -> (last = 0; for i in 1:n; last = i; end; c ? last : -1)
+    for n in (0, 1, 3), c in (false, true)
+        @test @roundtrip f_if_n(n, c)
+    end
+end
+
 @testset "for-in-range whose loop var escapes is a kept-carry ForOp" begin
     # `for i in 1:n; last = i; end; return last` copies the loop variable into
     # `last`. For a `1:n` range the iterate protocol makes `last` a value#1 shadow of

@@ -253,15 +253,9 @@ function simplify_loop_exit(body::Block)
     return result
 end
 
-"""Is the loop result's `pos`-th field read anywhere in the parent block? A `ForOp`
-does not carry its induction variable as a result; the IV is implicit in the range.
-Promotion can drop the IV carry and serve a post-loop `getfield` at that position
-from the exclusive `upper` bound, but `upper` equals the final IV only when the body
-ran at least once. An empty (zero-trip) loop leaves the IV at its init (`lower`), so
-the `upper` alias is wrong there. Callers use this per position to decide whether to
-keep an escaping IV or shadow as a real carry (read back normally) or to drop it
-(safe only when no live read remains). A genuine counted `for i in lo:hi` never reads
-`i` afterwards, since Julia scopes it out, so a counted loop is unaffected."""
+"""Check whether a loop result field has a live use. An escaping IV or shadow
+must remain a carry: the exclusive upper bound need not equal its final value
+(e.g. an empty while loop, or the last in-body IV of a for loop)."""
 function loop_result_pos_escapes(loop_idx::Int, pos::Int, parent_block::Block)
     for (pidx, pentry) in parent_block.body
         s = pentry.stmt
@@ -274,7 +268,7 @@ function loop_result_pos_escapes(loop_idx::Int, pos::Int, parent_block::Block)
     return false
 end
 
-"""Check if an SSA value is referenced in a block's body (after `after_idx`) or terminator."""
+"""Check for uses after `after_idx` or in the terminator, including nested regions."""
 function _ssa_used_in_block(ssa::SSAValue, after_idx::Int, block::Block)
     past = false
     for (sidx, sentry) in block.body
@@ -283,9 +277,9 @@ function _ssa_used_in_block(ssa::SSAValue, after_idx::Int, block::Block)
             continue
         end
         past || continue
-        _refs_ssa(sentry.stmt, ssa) && return true
+        _refs_ssa_deep(sentry.stmt, ssa) && return true
     end
-    block.terminator !== nothing && _refs_ssa(block.terminator, ssa) && return true
+    block.terminator !== nothing && _refs_ssa_deep(block.terminator, ssa) && return true
     return false
 end
 
@@ -293,6 +287,10 @@ function _refs_ssa(@nospecialize(val), ssa::SSAValue)
     val === ssa && return true
     if val isa Expr
         return any(a -> _refs_ssa(a, ssa), val.args)
+    elseif val isa PiNode
+        return _refs_ssa(val.val, ssa)
+    elseif val isa ConditionOp
+        return _refs_ssa(val.condition, ssa) || any(v -> v === ssa, val.args)
     elseif val isa YieldOp
         return any(v -> v === ssa, val.values)
     elseif val isa ContinueOp
