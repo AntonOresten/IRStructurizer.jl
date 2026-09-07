@@ -194,6 +194,7 @@ end
 exactly one predecessor edge is a copy of that edge's operand, left by an edge
 multiplexer's dispatch. An SSA-valued operand becomes a rename (`ssa_remap`); a
 constant/argument/undef operand is materialized as a copy at the arg's id.
+If a loop has already reserved a renamed id, emit the copy there instead.
 Multi-predecessor args (loop headers, branch merges) carry >=2 distinct edge
 operands and are resolved by the loop/branch machinery instead, so they are skipped
 here."""
@@ -206,11 +207,16 @@ function bind_single_pred_args!(block::Block, ctx::StructurizeCtx, b::Int)
     ops = edge_operands(m, only(preds), b)
     ops === nothing && return
     for (k, arg) in enumerate(args)
-        haskey(ctx.ssa_remap, arg) && continue   # already renamed by an enclosing pass
-        haskey(block.body, arg) && continue       # already a definition at this id
-        v = ops[k]
-        if v isa SSAValue
-            ctx.ssa_remap[arg] = get(ctx.ssa_remap, v.id, v.id)
+        idx = get(ctx.ssa_remap, arg, arg)
+        haskey(block.body, idx) && continue
+        v = remap_ssa_ref(ops[k], ctx.ssa_remap)
+        if idx != arg
+            # An enclosing loop reserved this id for an escaping value. Define
+            # the copy there so its continue/break operands have a definition.
+            push!(block, idx, v, get(ctx.types, arg, Any))
+            anchor_line!(ctx, idx, arg)
+        elseif v isa SSAValue
+            ctx.ssa_remap[arg] = v.id
         else
             push!(block, arg, v, get(ctx.types, arg, Any))   # constant / argument / undef copy
             anchor_line!(ctx, arg, arg)
