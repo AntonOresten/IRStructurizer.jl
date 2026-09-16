@@ -127,11 +127,13 @@ is_value_like_stmt(@nospecialize(s)) =
 # Fallback for unknown statement types (no-op)
 walk_uses!(f, ::Any) = nothing
 
-# Expr: only `:invoke` has a non-value prefix (CodeInstance/MI). A `:call`
-# callee and a `:new` type can themselves be SSA values and must be visited.
+# Expr: every argument is an operand, like the compiler's `userefs`. This
+# includes `args[1]`: the callee of a `:call`, the type of a `:new`/`:splatnew`,
+# the pointer of a `:foreigncall`, the token of a `:gc_preserve_end`, and even
+# the target of an `:invoke`/`:invoke_modify`, which codegen evaluates and so
+# need not be a literal CodeInstance/MethodInstance.
 function walk_uses!(f, expr::Expr)
-    first = expr.head === :invoke ? 2 : 1
-    for i in first:length(expr.args)
+    for i in 1:length(expr.args)
         f(IndexedUseRef(expr.args, i))
     end
 end
@@ -284,10 +286,9 @@ end
 """Check if a statement references `target` in any operand position."""
 function _references(@nospecialize(stmt), @nospecialize(target))
     if stmt isa Expr
-        # Skip only the CodeInstance/MI prefix of `:invoke`.
-        first = stmt.head === :invoke ? 2 : 1
-        for i in first:length(stmt.args)
-            normalize_key(stmt.args[i]) == target && return true
+        # All arguments are operands, including `args[1]` (see `walk_uses!`).
+        for arg in stmt.args
+            normalize_key(arg) == target && return true
         end
     elseif stmt isa ControlFlowOp
         # Check control flow operands (init values, conditions, etc.)

@@ -659,8 +659,12 @@ end
 end
 
 @testset "uses tracks expression first operands" begin
-    # The callee of a :call and the type of a :new/:splatnew may be SSA values.
-    for head in (:call, :new, :splatnew)
+    # `args[1]` is an operand for every head, as in the compiler's `userefs`:
+    # the callee of a :call, the type of a :new/:splatnew, the pointer of a
+    # :foreigncall, the token of a :gc_preserve_end, and the target of an
+    # :invoke/:invoke_modify (codegen evaluates it; it need not be a literal).
+    for head in (:call, :new, :splatnew, :foreigncall, :gc_preserve_end,
+                 :invoke, :invoke_modify)
         @testset "$head" begin
             block = Block()
             push!(block.body, (1, Expr(head, SSAValue(10), SSAValue(20)), Any))
@@ -698,17 +702,13 @@ end
 @testset "uses tracks :invoke callee (args[2])" begin
     # `:invoke` args are [CodeInstance/MI, callee, args…]. The callee (args[2])
     # is a real SSA use — e.g. an outlined closure being applied; missing it lets
-    # DCE drop the statement defining the callee, dangling the invoke. The MI at
-    # args[1] is not a value (here a stand-in Symbol), so it's never a use.
+    # DCE drop the statement defining the callee, dangling the invoke.
     block = Block()
     push!(block.body, (1, Expr(:invoke, :stand_in_mi, SSAValue(0), SSAValue(2)), Int))
     block.terminator = ReturnNode(SSAValue(1))
     idx = uses(block)
     @test length(idx[SSAValue(0)]) == 1   # callee counted as a use
     @test length(idx[SSAValue(2)]) == 1   # the call argument
-    @test !haskey(idx, :stand_in_mi)
-    @test isempty(uses(block, :stand_in_mi))
-    @test isempty(users(block, :stand_in_mi))
     @test length(uses(block, SSAValue(0))) == 1
     @test [inst.ssa_idx for inst in users(block, SSAValue(0))] == [1]
     # replace_uses! must rewrite the callee operand too.
